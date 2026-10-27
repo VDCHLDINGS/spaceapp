@@ -348,3 +348,29 @@ test("core seeds generic starter memory only when mutable owner memory is absent
   assert.match(starter, /^# SpaceApp Memory/m);
   assert.doesNotMatch(starter, /\/etc\/docs|\/srv\/space|spaceapp-user|oll4\.com/i);
 });
+
+test("each runtime target copies only its staged per-service /out/<target> payload instead of a shared /app tree", async () => {
+  const dockerfile = await readFile(join(root, "Dockerfile"), "utf8");
+  const stages = Object.fromEntries(
+    dockerfile.split(/^(?=FROM )/m).map((stage) => [stage.match(/^FROM \S+ AS (\S+)/)?.[1], stage])
+  );
+
+  assert.doesNotMatch(
+    stages["runtime-base"],
+    /COPY --from=build --chown=spaceapp:spaceapp \/app \/app/
+  );
+  assert.match(
+    stages.core,
+    /COPY --from=build --chown=spaceapp:spaceapp \/out\/core \/app/
+  );
+  assert.match(
+    stages.browser,
+    /COPY --from=build --chown=spaceapp:spaceapp \/out\/browser \/app/
+  );
+  assert.match(
+    stages.cli,
+    /COPY --from=build --chown=spaceapp:spaceapp \/out\/cli \/app/
+  );
+  assert.doesNotMatch(stages.browser, /\/out\/(?:core|cli)/);
+  assert.doesNotMatch(stages.cli, /\/out\/(?:core|browser)/);
+});

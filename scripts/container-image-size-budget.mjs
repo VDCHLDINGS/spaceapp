@@ -1,91 +1,82 @@
-#!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const mebibyte = 1024 * 1024;
 
-// 1.1.3 raised core and browser (998.7 / 1670.6 MiB measured): the current
-// application adds production dependencies pdfjs-dist with @napi-rs/canvas
-// (81 MiB, API PDF handling), typescript (23 MiB, peer of @t3-oss/env-core) and
-// js-tiktoken (22 MiB, Space Gateway token counting).
-// 1.1.5 raised core again: linux/arm64 measured 1066.9 MiB and linux/amd64 1045.0 MiB (sqlite3 in the image,
-// the 1.1.5 application); the first public release run failed the arm64 build at 1050 MiB.
-// 1.1.8 raised core to 1150 MiB for Python with sqlite3 (the Databases tool's SQLite worker): linux/amd64 measured
-// 1090.6 MiB with python3 (rc3 without Python: 1057.9 MiB); the trimmed python3-minimal + libpython3-stdlib variant
-// measured 1078.6 MiB, 21.4 MiB under the old 1100 MiB, and arm64 ran about 22 MiB above amd64 in 1.1.5.
-export const containerImageSizeBudgets = Object.freeze({
-  core: 1150 * mebibyte,
-  browser: 1750 * mebibyte,
-  cli: 2800 * mebibyte
+export const IMAGE_SIZE_BUDGETS_BYTES = Object.freeze({
+  core: 850 * mebibyte,
+  browser: 1350 * mebibyte,
+  cli: 1000 * mebibyte
 });
 
-export function evaluateContainerImageSize({ target, sizeBytes }) {
-  const budgetBytes = containerImageSizeBudgets[target];
-  if (budgetBytes === undefined) {
-    throw new Error(`Unknown container target: ${target}`);
-  }
-  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
-    throw new Error(`Invalid container image size: ${sizeBytes}`);
-  }
-
-  const remainingBytes = budgetBytes - sizeBytes;
-  return {
-    target,
-    sizeBytes,
-    budgetBytes,
-    remainingBytes,
-    ok: remainingBytes >= 0
-  };
-}
-
-function optionValue(args, name) {
-  const index = args.indexOf(name);
-  return index === -1 ? undefined : args[index + 1];
-}
-
-function formatMebibytes(bytes) {
+export function formatMebibytes(bytes) {
   return `${(bytes / mebibyte).toFixed(1)} MiB`;
 }
 
-export function inspectContainerImageSize(image) {
-  const output = execFileSync(
-    "docker",
-    ["image", "inspect", "--format", "{{.Size}}", image],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }
-  ).trim();
-  return Number(output);
-}
-
-export function runContainerImageSizeBudget(args = process.argv.slice(2)) {
-  const target = optionValue(args, "--target");
-  const image = optionValue(args, "--image");
-  if (!target || !image) {
-    throw new Error(
-      "Usage: container-image-size-budget.mjs --target <core|browser|cli> --image <name:tag>"
-    );
+export function evaluateImageSizeBudget({ target, sizeBytes, budgets = IMAGE_SIZE_BUDGETS_BYTES }) {
+  const budgetBytes = budgets[target];
+  if (!Number.isInteger(budgetBytes) || budgetBytes <= 0) {
+    throw new Error(`Unknown container size budget target: ${target}`);
+  }
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    throw new Error(`Invalid image size for ${target}: ${sizeBytes}`);
   }
 
-  const result = evaluateContainerImageSize({
+  return {
+    ok: sizeBytes <= budgetBytes,
     target,
-    sizeBytes: inspectContainerImageSize(image)
-  });
-  const summary = [
-    `${result.target} image ${image}: ${formatMebibytes(result.sizeBytes)}`,
-    `budget ${formatMebibytes(result.budgetBytes)}`,
-    `remaining ${formatMebibytes(result.remainingBytes)}`
-  ].join("; ");
-  if (!result.ok) {
-    throw new Error(`Container image size budget exceeded: ${summary}`);
-  }
-  process.stdout.write(`${summary}\n`);
-  return result;
+    sizeBytes,
+    budgetBytes,
+    summary: `${target}: ${formatMebibytes(sizeBytes)} / ${formatMebibytes(budgetBytes)}`
+  };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    runContainerImageSizeBudget();
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
+export function inspectDockerImageSize(image, exec = execFileSync) {
+  const raw = exec("docker", ["image", "inspect", "--format", "{{.Size}}", image], {
+    encoding: "utf8"
+  }).trim();
+  const sizeBytes = Number.parseInt(raw, 10);
+  if (!Number.isInteger(sizeBytes) || sizeBytes <= 0) {
+    throw new Error(`Docker reported an invalid image size for ${image}: ${raw}`);
   }
+  return sizeBytes;
+}
+
+function parseArgs(argv) {
+  let target = "";
+  let image = "";
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--target") {
+      target = argv[index + 1] ?? "";
+      index += 1;
+    } else if (arg === "--image") {
+      image = argv[index + 1] ?? "";
+      index += 1;
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+  if (!target || !image) {
+    throw new Error("Usage: node scripts/container-image-size-budget.mjs --target <core|browser|cli> --image <tag>");
+  }
+  return { target, image };
+}
+
+function main() {
+  const { target, image } = parseArgs(process.argv.slice(2));
+  const sizeBytes = inspectDockerImageSize(image);
+  const result = evaluateImageSizeBudget({ target, sizeBytes });
+  console.log(result.summary);
+  if (!result.ok) {
+    console.error(
+      `Container image ${image} exceeds the ${target} size budget (${result.sizeBytes} > ${result.budgetBytes} bytes).`
+    );
+    process.exit(1);
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
 }
