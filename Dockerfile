@@ -9,165 +9,9 @@ COPY . .
 RUN npm ci --no-audit --no-fund \
     && npm run build \
     && find node_modules -type f \( -name '*.js.map' -o -name '*.mjs.map' -o -name '*.cjs.map' -o -name '*.css.map' \) -delete \
-    && node --input-type=module -e '
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+    # Stage per-service /out/<target> trees (including scripts/rotate-owner-setup-token.mjs for core)
+    && node scripts/stage-service-runtime.mjs \
 
-const copyPath = (root, rel) => {
-  const src = join("/app", rel);
-  if (!existsSync(src)) return;
-  const dest = join(root, rel);
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, dest, { recursive: true, verbatimSymlinks: true });
-};
-
-const writeJson = (filePath, value) => {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
-};
-
-const rootPkg = JSON.parse(readFileSync("/app/package.json", "utf8"));
-const lockPkg = JSON.parse(readFileSync("/app/package-lock.json", "utf8"));
-const compiledNodePty = "/app/node_modules/node-pty";
-
-const coreWorkspaces = [
-  "apps/api",
-  "apps/worker",
-  "apps/web",
-  "packages/browser-host",
-  "packages/cli-host",
-  "packages/codex-app-server",
-  "packages/contracts",
-  "packages/db",
-  "packages/gateway",
-  "packages/memory-graph",
-  "packages/opencode-control",
-  "packages/runtime",
-  "packages/streaming"
-];
-
-const browserWorkspaces = [
-  "apps/api",
-  "packages/browser-host",
-  "packages/contracts",
-  "packages/db",
-  "packages/memory-graph",
-  "packages/runtime"
-];
-
-const cliWorkspaces = [
-  "packages/cli-host"
-];
-
-const stageTarget = (target, workspaces, customizeManifests, extraPaths) => {
-  const outRoot = join("/out", target);
-  mkdirSync(outRoot, { recursive: true });
-  const pkg = structuredClone(rootPkg);
-  delete pkg.devDependencies;
-  const lock = structuredClone(lockPkg);
-  writeJson(join(outRoot, "package.json"), pkg);
-  writeJson(join(outRoot, "package-lock.json"), lock);
-  for (const ws of workspaces) {
-    const wsPkg = JSON.parse(readFileSync(join("/app", ws, "package.json"), "utf8"));
-    delete wsPkg.devDependencies;
-    writeJson(join(outRoot, ws, "package.json"), wsPkg);
-  }
-  customizeManifests(outRoot);
-  const wsArgs = workspaces.flatMap((ws) => {
-    const wsPkg = JSON.parse(readFileSync(join(outRoot, ws, "package.json"), "utf8"));
-    return ["--workspace", wsPkg.name];
-  });
-  execFileSync(
-    "npm",
-    ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", ...wsArgs],
-    { cwd: outRoot, stdio: "inherit" }
-  );
-  if (existsSync(join(outRoot, "node_modules/node-pty")) && existsSync(compiledNodePty)) {
-    rmSync(join(outRoot, "node_modules/node-pty"), { recursive: true, force: true });
-    cpSync(compiledNodePty, join(outRoot, "node_modules/node-pty"), { recursive: true });
-  }
-  execFileSync(
-    "find",
-    [join(outRoot, "node_modules"), "-type", "f", "(", "-name", "*.js.map", "-o", "-name", "*.mjs.map", "-o", "-name", "*.cjs.map", "-o", "-name", "*.css.map", "-o", "-name", "*.d.ts.map", ")", "-delete"],
-    { stdio: "inherit" }
-  );
-  rmSync(join(outRoot, "package-lock.json"), { force: true });
-  for (const ws of workspaces) {
-    copyPath(outRoot, join(ws, "dist"));
-  }
-  for (const rel of extraPaths) {
-    copyPath(outRoot, rel);
-  }
-};
-
-stageTarget(
-  "core",
-  coreWorkspaces,
-  (outRoot) => {
-    const pkg = JSON.parse(readFileSync(join(outRoot, "package.json"), "utf8"));
-    delete pkg.dependencies.react;
-    delete pkg.dependencies["react-dom"];
-    writeJson(join(outRoot, "package.json"), pkg);
-    const webPkg = JSON.parse(readFileSync(join(outRoot, "apps/web/package.json"), "utf8"));
-    webPkg.dependencies = {};
-    writeJson(join(outRoot, "apps/web/package.json"), webPkg);
-  },
-  [
-    "apps/web/server.mjs",
-    "deploy/docker/core-entrypoint.sh",
-    "deploy/docker/core-supervisor.mjs",
-    "deploy/docker/memory-names.sh",
-    "scripts/portable-backup.mjs",
-    "scripts/portable-restore.mjs",
-    "scripts/reset-owner-password.mjs",
-    "scripts/rotate-owner-setup-token.mjs"
-  ]
-);
-
-stageTarget(
-  "browser",
-  browserWorkspaces,
-  (outRoot) => {
-    const pkg = JSON.parse(readFileSync(join(outRoot, "package.json"), "utf8"));
-    pkg.dependencies = { ws: rootPkg.dependencies.ws };
-    writeJson(join(outRoot, "package.json"), pkg);
-    const apiPkg = JSON.parse(readFileSync(join(outRoot, "apps/api/package.json"), "utf8"));
-    apiPkg.dependencies = {
-      "@space/browser-host": apiPkg.dependencies["@space/browser-host"],
-      "@space/contracts": apiPkg.dependencies["@space/contracts"],
-      "@space/db": apiPkg.dependencies["@space/db"],
-      "@space/memory-graph": apiPkg.dependencies["@space/memory-graph"],
-      "@space/runtime": apiPkg.dependencies["@space/runtime"],
-      "@t3-oss/env-core": apiPkg.dependencies["@t3-oss/env-core"],
-      nanoid: apiPkg.dependencies.nanoid,
-      zod: apiPkg.dependencies.zod
-    };
-    writeJson(join(outRoot, "apps/api/package.json"), apiPkg);
-  },
-  [
-    "deploy/docker/browser-entrypoint.sh"
-  ]
-);
-
-stageTarget(
-  "cli",
-  cliWorkspaces,
-  (outRoot) => {
-    const pkg = JSON.parse(readFileSync(join(outRoot, "package.json"), "utf8"));
-    pkg.dependencies = {};
-    writeJson(join(outRoot, "package.json"), pkg);
-  },
-  [
-    "agent-skills",
-    "deploy/docker/cli-entrypoint.sh",
-    "deploy/docker/credential-agent.mjs",
-    "deploy/docker/opencode-first-run.mjs",
-    "deploy/docker/provider-install.mjs",
-    "deploy/docker/public-cli-wrapper.sh"
-  ]
-);
-' \
     && npm cache clean --force \
     && rm -rf /root/.npm /tmp/*
 
@@ -182,7 +26,7 @@ LABEL org.opencontainers.image.licenses=MIT
 RUN npm install --global --ignore-scripts --no-audit --no-fund "npm@${NPM_VERSION}" \
     && install -d /tmp/npm-security-patches \
     && npm pack --ignore-scripts --no-audit --no-fund --pack-destination /tmp/npm-security-patches \
-      brace-expansion@5.0.12 tar@7.5.21 ip-address@10.7.4 undici@6.28.1 postcss-selector-parser@7.1.6 \
+      brace-expansion@5.0.12 tar@7.5.21 ip-address@10.7.4 undici@6.29.1 postcss-selector-parser@7.1.6 \
     && rm -rf \
       /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/tar \
@@ -201,7 +45,7 @@ RUN npm install --global --ignore-scripts --no-audit --no-fund "npm@${NPM_VERSIO
       -C /usr/local/lib/node_modules/npm/node_modules/tar --strip-components=1 \
     && tar -xzf /tmp/npm-security-patches/ip-address-10.7.4.tgz \
       -C /usr/local/lib/node_modules/npm/node_modules/ip-address --strip-components=1 \
-    && tar -xzf /tmp/npm-security-patches/undici-6.28.1.tgz \
+    && tar -xzf /tmp/npm-security-patches/undici-6.29.1.tgz \
       -C /usr/local/lib/node_modules/npm/node_modules/undici --strip-components=1 \
     && tar -xzf /tmp/npm-security-patches/postcss-selector-parser-7.1.6.tgz \
       -C /usr/local/lib/node_modules/npm/node_modules/postcss-selector-parser --strip-components=1 \

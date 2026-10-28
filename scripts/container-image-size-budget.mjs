@@ -10,10 +10,31 @@ export const IMAGE_SIZE_BUDGETS_BYTES = Object.freeze({
   cli: 1000 * mebibyte
 });
 
+/**
+ * Format a byte count into a human-readable mebibyte (`MiB`) string.
+ *
+ * @param {number} bytes - Image size in bytes.
+ * @returns {string} Formatted mebibyte string (e.g. `"850.0 MiB"`).
+ */
 export function formatMebibytes(bytes) {
   return `${(bytes / mebibyte).toFixed(1)} MiB`;
 }
 
+/**
+ * Evaluate whether an unpacked container image size stays within its target budget.
+ *
+ * @param {object} options - Evaluation inputs.
+ * @param {string} options.target - Target service name (`core`, `browser`, or `cli`).
+ * @param {number} options.sizeBytes - Measured image size in bytes.
+ * @param {Record<string, number>} [options.budgets=IMAGE_SIZE_BUDGETS_BYTES] - Budget table by target in bytes.
+ * @returns {{
+ *   ok: boolean,
+ *   target: string,
+ *   sizeBytes: number,
+ *   budgetBytes: number,
+ *   summary: string
+ * }} Structured budget evaluation result.
+ */
 export function evaluateImageSizeBudget({ target, sizeBytes, budgets = IMAGE_SIZE_BUDGETS_BYTES }) {
   const budgetBytes = budgets[target];
   if (!Number.isInteger(budgetBytes) || budgetBytes <= 0) {
@@ -32,6 +53,13 @@ export function evaluateImageSizeBudget({ target, sizeBytes, budgets = IMAGE_SIZ
   };
 }
 
+/**
+ * Inspect the unpacked byte size of a local Docker image via `docker image inspect`.
+ *
+ * @param {string} image - Docker image tag or ID to inspect.
+ * @param {typeof execFileSync} [exec=execFileSync] - Synchronous `execFileSync` implementation.
+ * @returns {number} Unpacked image size in bytes.
+ */
 export function inspectDockerImageSize(image, exec = execFileSync) {
   const raw = exec("docker", ["image", "inspect", "--format", "{{.Size}}", image], {
     encoding: "utf8"
@@ -43,6 +71,12 @@ export function inspectDockerImageSize(image, exec = execFileSync) {
   return sizeBytes;
 }
 
+/**
+ * Parse CLI arguments for the container image size budget script.
+ *
+ * @param {string[]} argv - Command-line argument list.
+ * @returns {{ target: string, image: string }} Parsed target and image tag.
+ */
 function parseArgs(argv) {
   let target = "";
   let image = "";
@@ -64,6 +98,11 @@ function parseArgs(argv) {
   return { target, image };
 }
 
+/**
+ * Run the CLI check to verify a container image's unpacked byte size against its target budget.
+ *
+ * @returns {void}
+ */
 function main() {
   const { target, image } = parseArgs(process.argv.slice(2));
   const sizeBytes = inspectDockerImageSize(image);
